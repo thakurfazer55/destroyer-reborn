@@ -654,4 +654,4 @@ static void __exit kcal_ctrl_exit(void)
 }
 
 late_initcall(kcal_ctrl_init);
-module_exit
+module_exit(kcal_ctrl_exit);
