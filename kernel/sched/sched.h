@@ -10,6 +10,9 @@
 #include "cpupri.h"
 #include "cpuacct.h"
 
+/* task_struct::on_rq states: */
+#define TASK_ON_RQ_MIGRATING	2
+
 extern __read_mostly int scheduler_running;
 
 /*
@@ -29,6 +32,13 @@ extern __read_mostly int scheduler_running;
 #define USER_PRIO(p)		((p)-MAX_RT_PRIO)
 #define TASK_USER_PRIO(p)	USER_PRIO((p)->static_prio)
 #define MAX_USER_PRIO		(USER_PRIO(MAX_PRIO))
+
+struct freq_max_load {
+	struct rcu_head rcu;
+	u32 freqs[0];
+};
+
+extern DEFINE_PER_CPU(struct freq_max_load *, freq_max_load);
 
 /*
  * Helpers for converting nanosecond timing to jiffy resolution
@@ -214,7 +224,7 @@ extern void init_cfs_bandwidth(struct cfs_bandwidth *cfs_b);
 extern int sched_group_set_shares(struct task_group *tg, unsigned long shares);
 
 extern void __refill_cfs_bandwidth_runtime(struct cfs_bandwidth *cfs_b);
-extern void __start_cfs_bandwidth(struct cfs_bandwidth *cfs_b);
+extern void __start_cfs_bandwidth(struct cfs_bandwidth *cfs_b, bool force);
 extern void unthrottle_cfs_rq(struct cfs_rq *cfs_rq);
 
 extern void free_rt_sched_group(struct task_group *tg);
@@ -240,6 +250,15 @@ extern int sched_group_set_shares(struct task_group *tg, unsigned long shares);
 struct cfs_bandwidth { };
 
 #endif	/* CONFIG_CGROUP_SCHED */
+
+#ifdef CONFIG_SCHED_HMP
+
+struct hmp_sched_stats {
+	int nr_big_tasks, nr_small_tasks;
+	u64 cumulative_runnable_avg;
+};
+
+#endif
 
 /* CFS-related fields in a runqueue */
 struct cfs_rq {
@@ -313,6 +332,11 @@ struct cfs_rq {
 	struct task_group *tg;	/* group that "owns" this runqueue */
 
 #ifdef CONFIG_CFS_BANDWIDTH
+
+#ifdef CONFIG_SCHED_HMP
+	struct hmp_sched_stats hmp_stats;
+#endif
+
 	int runtime_enabled;
 	u64 runtime_expires;
 	s64 runtime_remaining;
@@ -379,6 +403,9 @@ struct root_domain {
 	struct rcu_head rcu;
 	cpumask_var_t span;
 	cpumask_var_t online;
+
+	/* Indicate more than one runnable task for any CPU */
+	bool overload;
 
 	/*
 	 * The "RT overload" flag: it gets set if a CPU has more than
@@ -491,12 +518,14 @@ struct rq {
 	unsigned int cur_freq, max_freq, min_freq, max_possible_freq;
 	struct cpumask freq_domain_cpumask;
 
-	u64 cumulative_runnable_avg;
+	struct hmp_sched_stats hmp_stats;
+
 	int efficiency; /* Differentiate cpus with different IPC capability */
 	int load_scale_factor;
 	int capacity;
 	int max_possible_capacity;
 	u64 window_start;
+	unsigned long hmp_flags;
 
 #ifdef CONFIG_SCHED_FREQ_INPUT
 	unsigned int old_busy_time;
@@ -507,11 +536,8 @@ struct rq {
 #ifdef CONFIG_SCHED_FREQ_INPUT
 	u64 curr_runnable_sum;
 	u64 prev_runnable_sum;
-#endif
-
-#ifdef CONFIG_SCHED_HMP
-	int nr_small_tasks, nr_big_tasks;
-	unsigned long hmp_flags;
+	u64 nt_curr_runnable_sum;
+	u64 nt_prev_runnable_sum;
 #endif
 
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
@@ -544,6 +570,7 @@ struct rq {
 
 	/* sys_sched_yield() stats */
 	unsigned int yld_count;
+	unsigned int yield_sleep_count;
 
 	/* schedule() stats */
 	unsigned int sched_count;
@@ -705,6 +732,7 @@ extern struct mutex policy_mutex;
 extern unsigned int sched_ravg_window;
 extern unsigned int sched_use_pelt;
 extern unsigned int sched_disable_window_stats;
+extern unsigned int sched_enable_hmp;
 extern unsigned int max_possible_freq;
 extern unsigned int min_max_freq;
 extern unsigned int pct_task_load(struct task_struct *p);
@@ -726,10 +754,12 @@ extern unsigned int sched_init_task_load_pelt;
 extern unsigned int sched_init_task_load_windows;
 extern unsigned int sched_heavy_task;
 
-extern void fixup_nr_big_small_task(int cpu);
+extern void reset_cpu_hmp_stats(int cpu, int reset_cra);
+extern void fixup_nr_big_small_task(int cpu, int reset_stats);
 unsigned int max_task_load(void);
 extern void sched_account_irqtime(int cpu, struct task_struct *curr,
 				 u64 delta, u64 wallclock);
+extern unsigned int nr_eligible_big_tasks(int cpu);
 
 /*
  * 'load' is in reference to "best cpu" at its best frequency.
@@ -747,27 +777,45 @@ static inline u64 scale_load_to_cpu(u64 task_load, int cpu)
 }
 
 static inline void
-inc_cumulative_runnable_avg(struct rq *rq, struct task_struct *p)
+inc_cumulative_runnable_avg(struct hmp_sched_stats *stats,
+				 struct task_struct *p)
 {
-	if (sched_use_pelt)
-		rq->cumulative_runnable_avg +=
-				p->se.avg.runnable_avg_sum_scaled;
-	else if (!sched_disable_window_stats)
-		rq->cumulative_runnable_avg += p->ravg.demand;
+	u32 task_load;
+
+	if (!sched_enable_hmp || sched_disable_window_stats)
+		return;
+
+	task_load = sched_use_pelt ? p->se.avg.runnable_avg_sum_scaled :
+			(sched_disable_window_stats ? 0 : p->ravg.demand);
+
+	stats->cumulative_runnable_avg += task_load;
 }
 
 static inline void
-dec_cumulative_runnable_avg(struct rq *rq, struct task_struct *p)
+dec_cumulative_runnable_avg(struct hmp_sched_stats *stats,
+				 struct task_struct *p)
 {
-	if (sched_use_pelt)
-		rq->cumulative_runnable_avg -=
-				p->se.avg.runnable_avg_sum_scaled;
-	else if (!sched_disable_window_stats)
-		rq->cumulative_runnable_avg -= p->ravg.demand;
-	BUG_ON((s64)rq->cumulative_runnable_avg < 0);
+	u32 task_load;
+
+	if (!sched_enable_hmp || sched_disable_window_stats)
+		return;
+
+	task_load = sched_use_pelt ? p->se.avg.runnable_avg_sum_scaled :
+			(sched_disable_window_stats ? 0 : p->ravg.demand);
+
+	stats->cumulative_runnable_avg -= task_load;
+
+	BUG_ON((s64)stats->cumulative_runnable_avg < 0);
 }
 
 #else	/* CONFIG_SCHED_HMP */
+
+struct hmp_sched_stats;
+
+static inline unsigned int nr_eligible_big_tasks(int cpu)
+{
+	return 0;
+}
 
 static inline int pct_task_load(struct task_struct *p) { return 0; }
 
@@ -776,8 +824,8 @@ inc_cumulative_runnable_avg(struct rq *rq, struct task_struct *p)
 {
 }
 
-static inline void
-dec_cumulative_runnable_avg(struct rq *rq, struct task_struct *p)
+static inline void dec_cumulative_runnable_avg(struct hmp_sched_stats *stats,
+		 struct task_struct *p)
 {
 }
 
@@ -794,6 +842,11 @@ static inline unsigned long capacity_scale_cpu_freq(int cpu)
 static inline void sched_account_irqtime(int cpu, struct task_struct *curr,
 				 u64 delta, u64 wallclock)
 {
+}
+
+static inline unsigned int nr_eligible_big_tasks(int cpu)
+{
+	return 0;
 }
 
 #endif	/* CONFIG_SCHED_HMP */
@@ -852,15 +905,10 @@ static inline void clear_reserved(int cpu)
 	clear_bit(CPU_RESERVED, &rq->hmp_flags);
 }
 
-extern unsigned int sched_enable_hmp;
-extern unsigned int sched_enable_power_aware;
-
 int mostly_idle_cpu(int cpu);
 extern void check_for_migration(struct rq *rq, struct task_struct *p);
 extern void pre_big_small_task_count_change(const struct cpumask *cpus);
 extern void post_big_small_task_count_change(const struct cpumask *cpus);
-extern void inc_nr_big_small_task(struct rq *rq, struct task_struct *p);
-extern void dec_nr_big_small_task(struct rq *rq, struct task_struct *p);
 extern void set_hmp_defaults(void);
 extern unsigned int power_cost_at_freq(int cpu, unsigned int freq);
 extern void reset_all_window_stats(u64 window_start, unsigned int window_size);
@@ -868,21 +916,13 @@ extern void boost_kick(int cpu);
 
 #else /* CONFIG_SCHED_HMP */
 
-#define sched_enable_hmp 0
+#define sched_enable_hmp 1
 #define sched_freq_legacy_mode 1
 
 static inline void check_for_migration(struct rq *rq, struct task_struct *p) { }
 static inline void pre_big_small_task_count_change(void) { }
 static inline void post_big_small_task_count_change(void) { }
 static inline void set_hmp_defaults(void) { }
-
-static inline void inc_nr_big_small_task(struct rq *rq, struct task_struct *p)
-{
-}
-
-static inline void dec_nr_big_small_task(struct rq *rq, struct task_struct *p)
-{
-}
 
 static inline void clear_reserved(int cpu) { }
 
@@ -1053,6 +1093,11 @@ static inline int task_running(struct rq *rq, struct task_struct *p)
 }
 
 
+static inline int task_on_rq_migrating(struct task_struct *p)
+{
+	return p->on_rq == TASK_ON_RQ_MIGRATING;
+}
+
 #ifndef prepare_arch_switch
 # define prepare_arch_switch(next)	do { } while (0)
 #endif
@@ -1136,6 +1181,7 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 #define WF_SYNC		0x01		/* waker goes to sleep after wakeup */
 #define WF_FORK		0x02		/* child wakeup after fork */
 #define WF_MIGRATED	0x4		/* internal use, task got migrated */
+#define WF_NO_NOTIFIER	0x08		/* do not notify governor */
 
 static inline void update_load_add(struct load_weight *lw, unsigned long inc)
 {
@@ -1262,6 +1308,10 @@ struct sched_class {
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	void (*task_move_group) (struct task_struct *p, int on_rq);
 #endif
+#ifdef CONFIG_SCHED_HMP
+	void (*inc_hmp_sched_stats)(struct rq *rq, struct task_struct *p);
+	void (*dec_hmp_sched_stats)(struct rq *rq, struct task_struct *p);
+#endif
 };
 
 #define sched_class_highest (&stop_sched_class)
@@ -1329,23 +1379,28 @@ static inline u64 steal_ticks(u64 steal)
 
 static inline void inc_nr_running(struct rq *rq)
 {
-	sched_update_nr_prod(cpu_of(rq), rq->nr_running, true);
+	sched_update_nr_prod(cpu_of(rq), 1, true);
 	rq->nr_running++;
 
+	if (rq->nr_running >= 2) {
+#ifdef CONFIG_SMP
+		if (!rq->rd->overload)
+			rq->rd->overload = true;
+#endif
+
 #ifdef CONFIG_NO_HZ_FULL
-	if (rq->nr_running == 2) {
 		if (tick_nohz_full_cpu(rq->cpu)) {
 			/* Order rq->nr_running write against the IPI */
 			smp_wmb();
 			smp_send_reschedule(rq->cpu);
 		}
-       }
 #endif
+       }
 }
 
 static inline void dec_nr_running(struct rq *rq)
 {
-	sched_update_nr_prod(cpu_of(rq), rq->nr_running, false);
+	sched_update_nr_prod(cpu_of(rq), 1, false);
 	rq->nr_running--;
 }
 
@@ -1366,6 +1421,8 @@ extern void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags);
 extern const_debug unsigned int sysctl_sched_time_avg;
 extern const_debug unsigned int sysctl_sched_nr_migrate;
 extern const_debug unsigned int sysctl_sched_migration_cost;
+extern const_debug unsigned int sysctl_sched_yield_sleep_duration;
+extern const_debug int sysctl_sched_yield_sleep_threshold;
 
 static inline u64 sched_avg_period(void)
 {
@@ -1637,3 +1694,16 @@ static inline u64 irq_time_read(int cpu)
 }
 #endif /* CONFIG_64BIT */
 #endif /* CONFIG_IRQ_TIME_ACCOUNTING */
+
+static inline void account_reset_rq(struct rq *rq)
+{
+#ifdef CONFIG_IRQ_TIME_ACCOUNTING
+	rq->prev_irq_time = 0;
+#endif
+#ifdef CONFIG_PARAVIRT
+	rq->prev_steal_time = 0;
+#endif
+#ifdef CONFIG_PARAVIRT_TIME_ACCOUNTING
+	rq->prev_steal_time_rq = 0;
+#endif
+}

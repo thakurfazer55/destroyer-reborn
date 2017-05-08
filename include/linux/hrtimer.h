@@ -5,6 +5,7 @@
  *
  *   Copyright(C) 2005, Thomas Gleixner <tglx@linutronix.de>
  *   Copyright(C) 2005, Red Hat, Inc., Ingo Molnar
+ *   Copyright (C) 2014, NVIDIA CORPORATION.  All rights reserved.
  *
  *  data type definitions, declarations, prototypes
  *
@@ -23,6 +24,7 @@
 #include <linux/percpu.h>
 #include <linux/timer.h>
 #include <linux/timerqueue.h>
+#include <asm/relaxed.h>
 
 struct hrtimer_clock_base;
 struct hrtimer_cpu_base;
@@ -96,12 +98,6 @@ enum hrtimer_restart {
  * @function:	timer expiry callback function
  * @base:	pointer to the timer base (per cpu and per clock)
  * @state:	state information (See bit values above)
- * @start_site:	timer statistics field to store the site where the timer
- *		was started
- * @start_comm: timer statistics field to store the name of the process which
- *		started the timer
- * @start_pid: timer statistics field to store the pid of the task which
- *		started the timer
  *
  * The hrtimer structure must be initialized by hrtimer_init()
  */
@@ -111,11 +107,6 @@ struct hrtimer {
 	enum hrtimer_restart		(*function)(struct hrtimer *);
 	struct hrtimer_clock_base	*base;
 	unsigned long			state;
-#ifdef CONFIG_TIMER_STATS
-	int				start_pid;
-	void				*start_site;
-	char				start_comm[16];
-#endif
 };
 
 /**
@@ -420,6 +411,11 @@ static inline int hrtimer_callback_running(struct hrtimer *timer)
 	return timer->state & HRTIMER_STATE_CALLBACK;
 }
 
+static inline int hrtimer_callback_running_relaxed(struct hrtimer *timer)
+{
+	return cpu_relaxed_read_long(&timer->state) & HRTIMER_STATE_CALLBACK;
+}
+
 /* Forward a hrtimer so it expires after now: */
 extern u64
 hrtimer_forward(struct hrtimer *timer, ktime_t now, ktime_t interval);
@@ -453,12 +449,6 @@ extern void hrtimer_run_pending(void);
 
 /* Bootup initialization: */
 extern void __init hrtimers_init(void);
-
-#if BITS_PER_LONG < 64
-extern u64 ktime_divns(const ktime_t kt, s64 div);
-#else /* BITS_PER_LONG < 64 */
-# define ktime_divns(kt, div)		(u64)((kt).tv64 / (div))
-#endif
 
 /* Show pending timers: */
 extern void sysrq_timer_list_show(void);

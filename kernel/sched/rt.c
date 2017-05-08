@@ -1085,6 +1085,30 @@ void dec_rt_group(struct sched_rt_entity *rt_se, struct rt_rq *rt_rq) {}
 
 #endif /* CONFIG_RT_GROUP_SCHED */
 
+#ifdef CONFIG_SCHED_HMP
+
+static void
+inc_hmp_sched_stats_rt(struct rq *rq, struct task_struct *p)
+{
+	inc_cumulative_runnable_avg(&rq->hmp_stats, p);
+}
+
+static void
+dec_hmp_sched_stats_rt(struct rq *rq, struct task_struct *p)
+{
+	dec_cumulative_runnable_avg(&rq->hmp_stats, p);
+}
+
+#else	/* CONFIG_SCHED_HMP */
+
+static inline void
+inc_hmp_sched_stats_rt(struct rq *rq, struct task_struct *p) { }
+
+static inline void
+dec_hmp_sched_stats_rt(struct rq *rq, struct task_struct *p) { }
+
+#endif	/* CONFIG_SCHED_HMP */
+
 static inline
 void inc_rt_tasks(struct sched_rt_entity *rt_se, struct rt_rq *rt_rq)
 {
@@ -1207,6 +1231,7 @@ enqueue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 		enqueue_pushable_task(rq, p);
 
 	inc_nr_running(rq);
+	inc_hmp_sched_stats_rt(rq, p);
 }
 
 static void dequeue_task_rt(struct rq *rq, struct task_struct *p, int flags)
@@ -1219,6 +1244,7 @@ static void dequeue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 	dequeue_pushable_task(rq, p);
 
 	dec_nr_running(rq);
+	dec_hmp_sched_stats_rt(rq, p);
 }
 
 /*
@@ -1326,7 +1352,12 @@ select_task_rq_rt(struct task_struct *p, int sd_flag, int flags)
 	    (p->nr_cpus_allowed > 1)) {
 		int target = find_lowest_rq(p);
 
-		if (target != -1)
+		/*
+		* Don't bother moving it if the destination CPU is
+		* not running a lower priority task.
+		*/
+ 		if (target != -1 &&
+ 		 	p->prio < cpu_rq(target)->rt.highest_prio.curr)
 			cpu = target;
 	}
 	rcu_read_unlock();
@@ -1563,12 +1594,15 @@ static int find_lowest_rq_hmp(struct task_struct *task)
 	}
 	return best_cpu;
 }
-#else
+
+#else	/* CONFIG_SCHED_HMP */
+
 static int find_lowest_rq_hmp(struct task_struct *task)
 {
 	return -1;
 }
-#endif
+
+#endif	/* CONFIG_SCHED_HMP */
 
 static int find_lowest_rq(struct task_struct *task)
 {
@@ -1661,6 +1695,16 @@ static struct rq *find_lock_lowest_rq(struct task_struct *task, struct rq *rq)
 			break;
 
 		lowest_rq = cpu_rq(cpu);
+
+		if (lowest_rq->rt.highest_prio.curr <= task->prio) {
+ 			/*
+			* Target rq has tasks of equal or higher priority,
+			* retrying does not release any lock and is unlikely
+			* to yield a different result.
+			*/
+ 			lowest_rq = NULL;
+ 			break;
+ 		}
 
 		/* if the prio of this runqueue changed, try again */
 		if (double_lock_balance(rq, lowest_rq)) {
@@ -2005,6 +2049,7 @@ void init_sched_rt_class(void)
 					GFP_KERNEL, cpu_to_node(i));
 	}
 }
+
 #endif /* CONFIG_SMP */
 
 /*
@@ -2183,6 +2228,10 @@ const struct sched_class rt_sched_class = {
 
 	.prio_changed		= prio_changed_rt,
 	.switched_to		= switched_to_rt,
+#ifdef CONFIG_SCHED_HMP
+	.inc_hmp_sched_stats	= inc_hmp_sched_stats_rt,
+	.dec_hmp_sched_stats	= dec_hmp_sched_stats_rt,
+#endif
 };
 
 #ifdef CONFIG_SCHED_DEBUG

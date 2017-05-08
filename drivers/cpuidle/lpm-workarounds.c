@@ -163,6 +163,9 @@ static ssize_t store_clock_gating_enabled(struct kobject *kobj,
 	}
 
 	store_clock_gating = true;
+	if (cpumask_equal(&offline_mask, &l1_l2_offline_mask))
+		queue_work(lpm_wa_wq, &lpm_wa_work);
+
 	return count;
 }
 
@@ -229,7 +232,7 @@ static int lpm_wa_probe(struct platform_device *pdev)
 	key = "qcom,non-boot-cpu-index";
 	ret = of_property_read_u32(pdev->dev.of_node, key,
 						&non_boot_cpu_index);
-	if (!ret) {
+	if (ret) {
 		pr_err("%s: Missing qcom,non_boot_cpu_index property\n"
 							, __func__);
 	}

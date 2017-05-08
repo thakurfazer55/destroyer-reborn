@@ -4,6 +4,7 @@
  * Copyright (C) 1995-1999 Russell King
  * Copyright (C) 2012 ARM Ltd.
  *
+ *  Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
@@ -179,5 +180,7 @@ static inline void spin_lock_prefetch(const void *x)
 #define HAVE_ARCH_PICK_MMAP_LAYOUT
 
 #endif
+
+#include <asm-generic/processor.h>
 
 #endif /* __ASM_PROCESSOR_H */

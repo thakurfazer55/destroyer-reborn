@@ -1,4 +1,4 @@
-CFLAGS_devfreq_trace.o		:= -I$(src)
+CFLAGS_devfreq_trace.o		:= -I$(src) -O3 -ffast-math -fgcse-lm -fgcse-sm -fsched-spec-load -fforce-addr -fsingle-precision-constant -mcpu=cortex-a53 -mtune=cortex-a53
 
 obj-$(CONFIG_PM_DEVFREQ)	+= devfreq.o
 obj-$(CONFIG_PM_DEVFREQ)	+= devfreq_trace.o
@@ -8,6 +8,7 @@ obj-$(CONFIG_DEVFREQ_GOV_POWERSAVE)	+= governor_powersave.o
 obj-$(CONFIG_DEVFREQ_GOV_USERSPACE)	+= governor_userspace.o
 obj-$(CONFIG_DEVFREQ_GOV_CPUFREQ)	+= governor_cpufreq.o
 obj-$(CONFIG_DEVFREQ_GOV_MSM_ADRENO_TZ)	+= governor_msm_adreno_tz.o
+obj-$(CONFIG_ADRENO_IDLER)		+= adreno_idler.o
 obj-$(CONFIG_DEVFREQ_GOV_MSM_CPUFREQ)	+= governor_msm_cpufreq.o
 obj-$(CONFIG_ARCH_MSM_KRAIT)		+= krait-l2pm.o
 obj-$(CONFIG_MSM_BIMC_BWMON)		+= bimc-bwmon.o

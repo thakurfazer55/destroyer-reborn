@@ -105,6 +105,10 @@ config ARCH_MMAP_RND_COMPAT_BITS_MAX
 config STACKTRACE_SUPPORT
 	def_bool y
 
+config ILLEGAL_POINTER_VALUE
+	hex
+	default 0xdead000000000000
+
 config LOCKDEP_SUPPORT
 	def_bool y
 
@@ -437,9 +441,7 @@ config SWP_EMULATE
 
 	  If unsure, say Y.
 
-config HZ
-	int
-	default 100
+source kernel/Kconfig.hz
 
 config ARCH_HAS_HOLES_MEMORYMODEL
 	def_bool y if SPARSEMEM
